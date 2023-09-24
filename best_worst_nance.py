@@ -1,124 +1,151 @@
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+from pandas.plotting import table
 import requests
 import schedule
 import time
-from pandas.plotting import table
+import asyncio
 import os
-import matplotlib.dates as mdates
+from binance import AsyncClient
+from utils import send, sendimage, timeframe_formatter, tables, charts
 
-def main_function(timeframe, periods, min_vol = 30000000, startTime = None):
-    
-    def send(text):
-        url = 'https://api.telegram.org/bot'+token+'/sendMessage?chat_id='+id_tg+'&text='+text+''
-        resp = requests.get(url)
-        r = resp.json()
-        return
-    
-    def sendimage(img):
-        url = 'https://api.telegram.org/bot'+token+'/sendPhoto'
-        f = {'photo': open(img, 'rb')}
-        d = {'chat_id': id_tg}
-        resp = requests.get(url, files = f, data = d)
-        r = resp.json()
-        return r
-    
-    token = ''
-    id_tg = ''
+#def main_function(timeframe, periods, min_vol = 30000000, startTime = None):
 
+def binance_init():
+    binance_api_key = os.getenv("BINANCE_API_KEY")
+    binance_secret = os.getenv("BINANCE_SECRET")
+    client = AsyncClient(binance_api_key, binance_secret)
 
-    #querying all the USDT pairs from Binance
-    def pairs(filter='USDT'):
-        url = 'https://fapi.binance.com/fapi/v1/exchangeInfo'
-        r = requests.get(url)
-        if r.status_code == 200:
-            r = r.json()
-            pairs_data = r['symbols']
-            full_data_dic = {s['symbol']: s for s in pairs_data if filter in s['symbol']}
-            return full_data_dic.keys()
+    return client
+
+def tg_init():
+    token_tg = os.getenv("TELEGRAM_TOKEN")
+    id_tg = os.getenv("TELEGRAM_ID")
+
+    return token_tg, id_tg
+
+#querying all the USDT pairs from Binance
+async def pairs(client):
+    symbols = []
+    raw_data = await client.get_exchange_info()
+    for ticker in raw_data['symbols']:
+        if ticker['quoteAsset'] == 'USDT' and ticker['status'] == 'TRADING':
+            symbols.append(ticker['symbol'])
+    
+    return symbols
+
+#function to create dataframes with historic data
+async def get_klines(client, symbol, interval, startTime=None, limit=None):
+    df = pd.DataFrame()
+    try:
+        if startTime is not None and limit is not None:
+            klines_data = await client.get_klines(symbol=symbol, interval=interval, startTime=startTime, limit=limit)
+        elif startTime is not None and limit is None:
+            klines_data = await client.get_klines(symbol=symbol, interval=interval, startTime=startTime)
+        elif startTime is None and limit is not None:
+            klines_data = await client.get_klines(symbol=symbol, interval=interval, limit=limit)
         else:
-            return r.status_code
-
-    tickers = list(pairs('USDT'))
-
-    #removing expirable futures
-    tickers = [x for x in tickers if '_' not in x]
+            raise ValueError('startTime or limit has to be provided')
+        
+        dfi = pd.DataFrame(klines_data)
+        df['time'] = dfi[0].astype(float)
+        df['time'] = pd.to_datetime(df['time'], unit = 'ms')
+        df['close'] = dfi[4].astype(float)
+        df[f'volume_{symbol}'] = dfi[7].astype(float)
+        df['return'] = df['close'].pct_change(1)
+        df[f'{symbol}'] = (df['return'] + 1).cumprod() - 1
+        #set_index
+        datetime_series = df['time']
+        datetime_index = pd.DatetimeIndex(datetime_series.values)
+        df = df.set_index(datetime_index)
+        df.dropna(inplace = True)
+        df.drop(['time', 'close'], axis=1, inplace=True)
+    except Exception as e:
+        print(f'error processing {symbol}: {e}')
     
-    #function to create dataframes with historic data
-    def candles(ticker,tf,startTime,limit):
-        url = 'https://fapi.binance.com/fapi/v1/klines'
-        param = {'symbol': ticker, 'interval': tf, 'limit': limit}
-        if startTime is not None:
-            param['startTime'] = startTime
-        r = requests.get(url, params = param)
-        if r.status_code == 200:
-            dfi = pd.DataFrame(r.json())
-            #fetching only data that we need
-            df = pd.DataFrame()
-            df['time'] = dfi[0].astype(float)
-            df['time'] = pd.to_datetime(df['time'], unit = 'ms')
-            df['close'] = dfi[4].astype(float)
-            df['volume'] = dfi[7].astype(float)
-            ret = 'return_' + ticker
-            df[ret] = df['close'].pct_change(1)
-            df[f'cum_{ret}'] = (df[ret] + 1).cumprod() - 1
-            df.rename(columns = {'close':'close_' + ticker}, inplace = True)
-            df.rename(columns = {'volume':'volume_' + ticker}, inplace = True)
-            #set_index
-            datetime_series = df['time']
-            datetime_index = pd.DatetimeIndex(datetime_series.values)
-            df = df.set_index(datetime_index)
-            df.drop(["time"], axis = 1, inplace = True)
-            df.dropna(inplace = True)
-            return df
-        else:
-            return(print('doublecheck'))
-    
-    #dataframes to filter by last day's volume
-    timeframe_daily = '1d'
-    lmt = 3
-    for i in tickers:
+    return df
+
+async def ticker_volume_filtering(client, tickers, min_vol):
+    volume_df = pd.DataFrame()
+
+    async def process_ticker(ticker):
         try:
-            globals()[f'{i}'] = candles(i,timeframe_daily, startTime,lmt)
-        except:
-            pass
-        
-    #building a vol spreadsheet
-    df = pd.DataFrame(index = BTCUSDT.index)
-    df['BTCUSDT'] = BTCUSDT['volume_BTCUSDT']
-    for i in tickers:
+            df = await get_klines(client=client, symbol=ticker, interval='1d', limit=3)
+            if df.shape[0] > 0:  # Check if df has at least one row
+                return ticker, df[f'volume_{ticker}']
+        except Exception as e:
+            print(f'an issue with {ticker}: {e}')
+        return ticker, None
+    
+    tasks = [process_ticker(ticker) for ticker in tickers]
+    results = await asyncio.gather(*tasks)
+
+    for ticker, volume_series in results:
+        if volume_series is not None:
+            volume_df[ticker] = volume_series
+
+    if volume_df.shape[1] > 0:
+        volume_list = volume_df.columns[(volume_df.iloc[[0]] > min_vol).all()]
+        filtered_tickers = volume_list.tolist()
+    else:
+        filtered_tickers = []
+    return filtered_tickers
+
+async def df_creation(client, filtered_tickers, interval, startTime=None, limit=None):
+    df_dict = {}
+
+    async def process_ticker(ticker):
         try:
-            df[f'{i}'] = globals()[f'{i}'][f'volume_{i}']
-        except:
-            pass
-
-    # VOLUME filtering
-    volume_list = df.columns[(df.iloc[[0]] > min_vol).all()]
-    tickers = volume_list.tolist()
-
-    #20% of total
-    percentage = 0.20
-    top_percent = int(round(len(tickers) * percentage, 0))
+            df_dict[ticker] = await get_klines(client, ticker, interval, startTime, limit)
+            return ticker, df_dict[ticker]
+        except Exception as e:
+            print(f'error occurred in df_creation, {ticker}: {e}')
     
-    #dataframes with volume above x
-    tf = timeframe
-    lmt = periods
-    for i in tickers:
-        globals()[f'{i}'] = candles(i,tf,startTime,lmt)
-    
-    #df for correlation and beta
-    df_returns = pd.DataFrame(index = ETHUSDT.index)
-    df_returns['BTCUSDT'] = BTCUSDT['return_BTCUSDT']
-    for i in tickers:
-        df_returns[f'{i}'] = globals()[f'{i}'][f'return_{i}']
-        
-    # df for relative strength days
-    df_rel_str = pd.DataFrame(index=ETHUSDT.index)
-    df_rel_str['BTCUSDT'] = BTCUSDT['cum_return_BTCUSDT']
-    for i in tickers:
-        df_rel_str[f'{i}'] = globals()[f'{i}'][f'cum_return_{i}']
+    tasks = [process_ticker(ticker) for ticker in filtered_tickers]
+    results = await asyncio.gather(*tasks)
 
-        
+    for ticker, df in results:
+        if df is not None:
+            df_dict[ticker] = df
+
+    return df_dict
+
+
+def best_worst_coins(filtered_tickers, df_dict, percentage=0.2):
+    top_percentage = int(round(len(filtered_tickers) * percentage, 0))
+
+    cum_perf = pd.DataFrame()
+    for k,v in df_dict.items():
+        cum_perf[k] = df_dict[k][k]
+
+    #.max() here simply turns df into series
+    last_value_series = cum_perf[-1::].max()
+    best_performers = round(last_value_series.nlargest(top_percentage)*100, 2)
+    worst_performers = round(last_value_series.nsmallest(top_percentage)*100, 2)
+    best_perf_list = best_performers.index.to_list()
+    worst_perf_list = worst_performers.index.to_list()
+    best_perf_list.append('BTCUSDT')
+    worst_perf_list.append('BTCUSDT')
+    return best_perf_list, worst_perf_list
+
+def best_worst_df(top_list, df_dict):
+    df = pd.DataFrame()
+    for ticker in top_list:
+        try:
+            df[ticker] = df_dict[ticker][ticker]
+        except Exception as e:
+            print(f'Error occurred while processing {ticker}: {e}')
+    return df
+
+def beta_correlation(top_tokens_series, df_dict):
+    df_returns = pd.DataFrame()
+    for ticker in top_tokens_series:
+        try:
+            df_returns[ticker] = df_dict[ticker]['return']
+        except Exception as e:
+            print(f'problem in beta_correlation with {ticker}: {e}')
+
     #beta
     covariance = df_returns.cov()
     beta = covariance['BTCUSDT']/df_returns['BTCUSDT'].var()
@@ -127,129 +154,61 @@ def main_function(timeframe, periods, min_vol = 30000000, startTime = None):
     df_corr = df_returns.corr()
     correlation = df_corr['BTCUSDT']
     correlation = correlation.round(2)
-    
-    #best and worst performers
-    last_value_series = df_rel_str[-1::].max()
-    best_performers = round(last_value_series.nlargest(top_percent)*100, 2)
-    worst_performers = round(last_value_series.nsmallest(top_percent)*100, 2)
-    
-    best_perf_list = best_performers.index.to_list()
-    worst_perf_list = worst_performers.index.to_list()
+    return beta, correlation
 
-    if timeframe == '5m':
-        a = int((periods / 12))
-        days_hours = 'hours'
-    if timeframe == '15m':
-        a = int((periods / 4))
-        days_hours = 'hours'
-    if timeframe == '1h':
-        a = int(periods)
-        days_hours = 'hours'
-    if timeframe == '4h':
-        a = int((periods * 4))
-        days_hours = 'hours'
-    if timeframe == '1d':
-        a = int(periods)
-        days_hours = 'days'
 
-    
-    #function to create tables
-    def tables(series_top_tokens, beta_series, corr_series):
-        
-        #creating a dataframe for a table best perf
-        dfp = pd.DataFrame(index = series_top_tokens.keys())
-        dfp['Return %'] = series_top_tokens
-        dfp['Beta'] = dfp.index.map(dict(zip(beta_series.index,beta_series)))
-        dfp['Correlation'] = dfp.index.map(dict(zip(corr_series.index,corr_series)))
-    
-        #creating a table
-        plt.clf()
-        ax = plt.subplot(111, frame_on=False) # no visible frame
-        ax.xaxis.set_visible(False)  # hide the x axis
-        ax.yaxis.set_visible(False)  # hide the y axis
+async def main(min_vol, interval, percentage=0.2, startTime=None, limit=None):
+    client = binance_init()
+    token_tg, id_tg = tg_init()
+    symbols = await pairs(client)
+    filtered_tickers = await ticker_volume_filtering(client, symbols, min_vol)
+    df_dict = await df_creation(client=client, filtered_tickers= filtered_tickers, interval=interval, startTime=startTime, limit=limit)
+    best_list, worst_list = best_worst_coins(filtered_tickers, df_dict, percentage)
+    best_df = best_worst_df(best_list, df_dict)
+    worst_df = best_worst_df(worst_list, df_dict)
+    best_beta, best_correlation = beta_correlation(best_df, df_dict)
+    worst_beta, worst_correlation = beta_correlation(worst_df, df_dict)
 
-        table(ax, dfp, loc = 'center')  # where df is your data frame
-        plt.savefig('mytable.png', bbox_inches = 'tight')
-        
-        return
-    
-    #calling functions, renaming tables
-    tables(best_performers, beta, correlation)
+    tables(best_df, best_beta, best_correlation)
     try:
         os.rename('mytable.png', 'mytable_best.png')
     except:
         os.remove('mytable_best.png')
         os.rename('mytable.png', 'mytable_best.png')
 
-    tables(worst_performers, beta, correlation)
+    tables(worst_df, worst_beta, worst_correlation)
     try:
         os.rename('mytable.png', 'mytable_worst.png')
     except:
         os.remove('mytable_worst.png')
         os.rename('mytable.png', 'mytable_worst.png')
 
+    a_periods, days_hours = timeframe_formatter(interval, limit)
 
-    #function to create plots
-    def charts(kind, top_bottom, df_rel_str, perf_list, timeframe):
-        df_plot = pd.DataFrame(index = df_rel_str.index)
-        df_plot['BTCUSDT'] = df_rel_str['BTCUSDT']
-        for i in perf_list:
-            try:
-                df_plot[f'{i}'] = df_rel_str[f'{i}']
-            except:
-                pass
 
-        plt.figure(figsize=(12, 8))
-        plt.title(f'{kind} performers & BTC, last {a} {days_hours}, Binance futures, volume > ${int(min_vol/1000000)}m, {top_bottom} {int(percentage*100)}%')
-        for asset in df_plot:
-            if asset != 'BTCUSDT':
-                plt.plot(df_plot.index, df_plot[asset], label = f'{asset} {round(df_plot[asset][-1]*100, 2)}%')
-                plt.annotate(asset, xy=(0.95, df_rel_str[asset][-1]), xytext=(8, 0), 
-                     xycoords=('axes fraction', 'data'), textcoords='offset points', size = 8, weight = 'bold')
-                plt.legend(loc = 'best')
-            else:
-                plt.plot(df_plot.index, df_plot[asset], label = f'{asset} {round(df_plot[asset][-1]*100, 2)}%', linestyle = 'dashed')
-                plt.annotate(asset, xy=(0.95, df_rel_str[asset][-1]), xytext=(8, 0), 
-                     xycoords=('axes fraction', 'data'), textcoords='offset points', size = 8, weight = 'bold')
-                plt.legend(loc = 'lower left')
-        plt.xlabel('Datetime UTC', fontsize = 13)
-        plt.ylabel('Return', fontsize = 13)
-        plt.grid(axis='y')
-
-        plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%d/%m %H:%M'))
-
-        plt.savefig('mychart.png')
-
-        return
-
-    charts('Best', 'top', df_rel_str, best_perf_list, a)
+    charts(a_periods, days_hours, 'Best', 'top', min_vol, percentage, best_df)
     try:
         os.rename('mychart.png', 'mychart_best.png')
     except:
         os.remove('mychart_best.png')
         os.rename('mychart.png', 'mychart_best.png')
 
-    charts('Worst', 'bottom', df_rel_str, worst_perf_list, a)
+    charts(a_periods, days_hours, 'Best', 'top', min_vol, percentage, worst_df)
     try:
         os.rename('mychart.png', 'mychart_worst.png')
     except:
         os.remove('mychart_worst.png')
         os.rename('mychart.png', 'mychart_worst.png')
 
-    
+
     # sending to a bot
-    send('%23best_worst_perf')
-    send(f'Best Performers, last {a} hours, in %: \n{best_performers.to_string()}')
-    sendimage('mytable_best.png')
-    sendimage('mychart_best.png')
-    send(f'Worst Performers, last {a} hours, in %: \n{worst_performers.to_string()}')
-    sendimage('mytable_worst.png')
-    sendimage('mychart_worst.png')
+    send(token_tg, id_tg, '%23best_worst_perf')
+    send(token_tg, id_tg, f'Best Performers, last {a_periods} hours, in %: \n{best_list.to_string()}')
+    sendimage(token_tg, id_tg, 'mytable_best.png')
+    sendimage(token_tg, id_tg, 'mychart_best.png')
+    send(token_tg, id_tg, f'Worst Performers, last {a_periods} hours, in %: \n{worst_list.to_string()}')
+    sendimage(token_tg, id_tg, 'mytable_worst.png')
+    sendimage(token_tg, id_tg, 'mychart_worst.png')
 
-    
-    return
-
-    
-def last7d():
-    main_function(timeframe = '1h', periods = 168)
-
+if __name__ == "__main__":
+    asyncio.run(main(min_vol=30000000, interval='1h', percentage=0.2, startTime=None, limit=150))
