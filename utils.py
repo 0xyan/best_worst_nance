@@ -5,19 +5,19 @@ import matplotlib.dates as mdates
 from pandas.plotting import table
 
 
-def send(token, id_tg, text):
-    url = 'https://api.telegram.org/bot'+token+'/sendMessage?chat_id='+id_tg+'&text='+text+''
+def send(token_tg, id_tg, text):
+    url = 'https://api.telegram.org/bot'+token_tg+'/sendMessage?chat_id='+id_tg+'&text='+text+''
     resp = requests.get(url)
     r = resp.json()
-    return r
+    return
 
-def sendimage(token, id_tg, img):
-    url = 'https://api.telegram.org/bot'+token+'/sendPhoto'
+def sendimage(token_tg, id_tg, img):
+    url = 'https://api.telegram.org/bot'+token_tg+'/sendPhoto'
     f = {'photo': open(img, 'rb')}
     d = {'chat_id': id_tg}
     resp = requests.get(url, files = f, data = d)
     r = resp.json()
-    return r
+    return
 
 def timeframe_formatter(timeframe, periods):
     #candlesticks to hour format
@@ -41,7 +41,6 @@ def timeframe_formatter(timeframe, periods):
 
 #function to create tables
 def tables(series_top_tokens, beta_series, corr_series):
-    
     #creating a dataframe for a table best perf
     dfp = pd.DataFrame(index = series_top_tokens.index)
     dfp['Return %'] = series_top_tokens.values

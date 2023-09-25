@@ -9,8 +9,9 @@ import asyncio
 import os
 from binance import AsyncClient
 from utils import send, sendimage, timeframe_formatter, tables, charts
+from dotenv import load_dotenv
 
-#def main_function(timeframe, periods, min_vol = 30000000, startTime = None):
+load_dotenv()
 
 def binance_init():
     binance_api_key = os.getenv("BINANCE_API_KEY")
@@ -25,28 +26,26 @@ def tg_init():
 
     return token_tg, id_tg
 
-#querying all the USDT pairs from Binance
 async def pairs(client):
     symbols = []
-    raw_data = await client.get_exchange_info()
+    raw_data = await client.futures_exchange_info()
     for ticker in raw_data['symbols']:
-        if ticker['quoteAsset'] == 'USDT' and ticker['status'] == 'TRADING':
+        if ticker['quoteAsset'] == 'USDT' and ticker['contractType'] == 'PERPETUAL':
             symbols.append(ticker['symbol'])
-    
     return symbols
 
 #function to create dataframes with historic data
-async def get_klines(client, symbol, interval, startTime=None, limit=None):
+async def futures_continous_klines(client, symbol, interval, start_str=None, limit=None):
     df = pd.DataFrame()
     try:
-        if startTime is not None and limit is not None:
-            klines_data = await client.get_klines(symbol=symbol, interval=interval, startTime=startTime, limit=limit)
-        elif startTime is not None and limit is None:
-            klines_data = await client.get_klines(symbol=symbol, interval=interval, startTime=startTime)
-        elif startTime is None and limit is not None:
-            klines_data = await client.get_klines(symbol=symbol, interval=interval, limit=limit)
+        if start_str is not None and limit is not None:
+            klines_data = await client.futures_continous_klines(pair=symbol, interval=interval, contractType='PERPETUAL', start_str=start_str, limit=limit)
+        elif start_str is not None and limit is None:
+            klines_data = await client.futures_continous_klines(pair=symbol, interval=interval, contractType='PERPETUAL', start_str=start_str)
+        elif start_str is None and limit is not None:
+            klines_data = await client.futures_continous_klines(pair=symbol, interval=interval, contractType='PERPETUAL', limit=limit)
         else:
-            raise ValueError('startTime or limit has to be provided')
+            raise ValueError('start_str or limit has to be provided')
         
         dfi = pd.DataFrame(klines_data)
         df['time'] = dfi[0].astype(float)
@@ -67,13 +66,13 @@ async def get_klines(client, symbol, interval, startTime=None, limit=None):
     return df
 
 async def ticker_volume_filtering(client, tickers, min_vol):
-    volume_df = pd.DataFrame()
+    volumes = {}
+    filtered_tickers = []
 
     async def process_ticker(ticker):
         try:
-            df = await get_klines(client=client, symbol=ticker, interval='1d', limit=3)
-            if df.shape[0] > 0:  # Check if df has at least one row
-                return ticker, df[f'volume_{ticker}']
+            df = await futures_continous_klines(client=client, symbol=ticker, interval='1d', limit=3)
+            return ticker, df[f'volume_{ticker}'][0]
         except Exception as e:
             print(f'an issue with {ticker}: {e}')
         return ticker, None
@@ -81,23 +80,22 @@ async def ticker_volume_filtering(client, tickers, min_vol):
     tasks = [process_ticker(ticker) for ticker in tickers]
     results = await asyncio.gather(*tasks)
 
-    for ticker, volume_series in results:
-        if volume_series is not None:
-            volume_df[ticker] = volume_series
+    for ticker, volume in results:
+        if volume is not None:
+            volumes[ticker] = volume
 
-    if volume_df.shape[1] > 0:
-        volume_list = volume_df.columns[(volume_df.iloc[[0]] > min_vol).all()]
-        filtered_tickers = volume_list.tolist()
-    else:
-        filtered_tickers = []
+    for k,v in volumes.items():
+        if v > min_vol:
+            filtered_tickers.append(k)
+    
     return filtered_tickers
 
-async def df_creation(client, filtered_tickers, interval, startTime=None, limit=None):
+async def df_creation(client, filtered_tickers, interval, start_str=None, limit=None):
     df_dict = {}
 
     async def process_ticker(ticker):
         try:
-            df_dict[ticker] = await get_klines(client, ticker, interval, startTime, limit)
+            df_dict[ticker] = await futures_continous_klines(client, ticker, interval, start_str, limit)
             return ticker, df_dict[ticker]
         except Exception as e:
             print(f'error occurred in df_creation, {ticker}: {e}')
@@ -157,26 +155,30 @@ def beta_correlation(top_tokens_series, df_dict):
     return beta, correlation
 
 
-async def main(min_vol, interval, percentage=0.2, startTime=None, limit=None):
+async def main(min_vol, interval, percentage=0.2, start_str=None, limit=None):
     client = binance_init()
     token_tg, id_tg = tg_init()
     symbols = await pairs(client)
     filtered_tickers = await ticker_volume_filtering(client, symbols, min_vol)
-    df_dict = await df_creation(client=client, filtered_tickers= filtered_tickers, interval=interval, startTime=startTime, limit=limit)
+    df_dict = await df_creation(client=client, filtered_tickers= filtered_tickers, interval=interval, start_str=start_str, limit=limit)
     best_list, worst_list = best_worst_coins(filtered_tickers, df_dict, percentage)
     best_df = best_worst_df(best_list, df_dict)
     worst_df = best_worst_df(worst_list, df_dict)
     best_beta, best_correlation = beta_correlation(best_df, df_dict)
     worst_beta, worst_correlation = beta_correlation(worst_df, df_dict)
+    best_performers = round(best_df[-1::].max() * 100, 2)
+    worst_performers = round(worst_df[1::].max() * 100, 2)
 
-    tables(best_df, best_beta, best_correlation)
+    print(worst_df)
+
+    tables(best_performers, best_beta, best_correlation)
     try:
         os.rename('mytable.png', 'mytable_best.png')
     except:
         os.remove('mytable_best.png')
         os.rename('mytable.png', 'mytable_best.png')
 
-    tables(worst_df, worst_beta, worst_correlation)
+    tables(worst_performers, worst_beta, worst_correlation)
     try:
         os.rename('mytable.png', 'mytable_worst.png')
     except:
@@ -193,7 +195,7 @@ async def main(min_vol, interval, percentage=0.2, startTime=None, limit=None):
         os.remove('mychart_best.png')
         os.rename('mychart.png', 'mychart_best.png')
 
-    charts(a_periods, days_hours, 'Best', 'top', min_vol, percentage, worst_df)
+    charts(a_periods, days_hours, 'Worst', 'bottom', min_vol, percentage, worst_df)
     try:
         os.rename('mychart.png', 'mychart_worst.png')
     except:
@@ -203,12 +205,12 @@ async def main(min_vol, interval, percentage=0.2, startTime=None, limit=None):
 
     # sending to a bot
     send(token_tg, id_tg, '%23best_worst_perf')
-    send(token_tg, id_tg, f'Best Performers, last {a_periods} hours, in %: \n{best_list.to_string()}')
+    send(token_tg, id_tg, f'Best Performers, last {a_periods} hours, in %: \n{best_performers}')
     sendimage(token_tg, id_tg, 'mytable_best.png')
     sendimage(token_tg, id_tg, 'mychart_best.png')
-    send(token_tg, id_tg, f'Worst Performers, last {a_periods} hours, in %: \n{worst_list.to_string()}')
+    send(token_tg, id_tg, f'Worst Performers, last {a_periods} hours, in %: \n{worst_performers}')
     sendimage(token_tg, id_tg, 'mytable_worst.png')
     sendimage(token_tg, id_tg, 'mychart_worst.png')
 
 if __name__ == "__main__":
-    asyncio.run(main(min_vol=30000000, interval='1h', percentage=0.2, startTime=None, limit=150))
+    asyncio.run(main(min_vol=30000000, interval='1h', percentage=0.2, start_str=None, limit=150))
