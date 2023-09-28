@@ -1,2 +1,2 @@
 # best_worst_nance
-The scripts calculates the best performers ob Binance futures for given period with given filters, calculates correlation and beta, and send to telegram
+The script calculates the best performers on Binance futures for a given period with given filters, calculates correlation and beta, and sends it to telegram
