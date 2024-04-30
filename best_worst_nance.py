@@ -169,8 +169,6 @@ async def main(min_vol, interval, percentage=0.2, start_str=None, limit=None):
     best_performers = round(best_df[-1::].max() * 100, 2)
     worst_performers = round(worst_df[1::].max() * 100, 2)
 
-    print(worst_df)
-
     tables(best_performers, best_beta, best_correlation)
     try:
         os.rename('mytable.png', 'mytable_best.png')
