@@ -206,11 +206,29 @@ async def main(min_vol, interval, percentage=0.2, start_str=None, limit=None):
     # sending to a bot
     send(token_tg, id_tg, '%23best_worst_perf')
     send(token_tg, id_tg, f'Best Performers, last {a_periods} hours, in %: \n{best_performers}')
-    sendimage(token_tg, id_tg, 'mytable_best.png')
+    #sendimage(token_tg, id_tg, 'mytable_best.png')
     sendimage(token_tg, id_tg, 'mychart_best.png')
     send(token_tg, id_tg, f'Worst Performers, last {a_periods} hours, in %: \n{worst_performers}')
-    sendimage(token_tg, id_tg, 'mytable_worst.png')
+    #sendimage(token_tg, id_tg, 'mytable_worst.png')
     sendimage(token_tg, id_tg, 'mychart_worst.png')
 
+def two_days():
+    asyncio.run(main(min_vol=80000000, interval='15m', percentage=0.2, start_str=None, limit=192))
+
+def week():
+    asyncio.run(main(min_vol=80000000, interval='1h', percentage=0.2, start_str=None, limit=168))
+
+'''
+def setup_schedule():
+    schedule.every().day.at("09:00").do(two_days)
+    schedule.every().monday.at("15:00").do(week)
+    schedule.every().wednesday.at("15:00").do(week)
+    schedule.every().friday.at("15:00").do(week)
+
+    while True:
+        schedule.run_pending()
+        time.sleep(1)
+'''
+
 if __name__ == "__main__":
-    asyncio.run(main(min_vol=30000000, interval='1h', percentage=0.2, start_str=None, limit=150))
+    week()
