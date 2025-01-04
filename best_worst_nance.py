@@ -255,10 +255,10 @@ def week():
 
 
 def setup_schedule():
-    schedule.every().day.at("09:00").do(two_days)
-    schedule.every().monday.at("15:00").do(week)
-    schedule.every().wednesday.at("15:00").do(week)
-    schedule.every().friday.at("15:00").do(week)
+    schedule.every().day.at("03:30").do(two_days)
+    schedule.every().monday.at("04:30").do(week)
+    schedule.every().wednesday.at("04:30").do(week)
+    schedule.every().friday.at("04:30").do(week)
 
     while True:
         schedule.run_pending()
